@@ -140,7 +140,7 @@ class GroupedQueryAttention(nn.Module):
         values = repeat_kv(v, self.num_rep)
 
         if self.use_flash:
-            output = F.scaled_dot_product_attention(queries, keys, v, is_causal=False)
+            output = F.scaled_dot_product_attention(queries, keys, values, is_causal=False)
             
         else: # Calculate Grouped Query Attention manually
         
@@ -198,6 +198,8 @@ class Transformer(nn.Module, PyTorchModelHubMixin): # extending PyTorchModelHubM
     def __init__(self, config: ModelConfig):
         super().__init__()
 
+        self.config = config
+
         self.vocab_size = config.vocab_size
         self.num_dims = config.num_dims
         self.num_heads = config.num_heads
@@ -214,7 +216,6 @@ class Transformer(nn.Module, PyTorchModelHubMixin): # extending PyTorchModelHubM
 
         self.norm = torch.nn.modules.normalization.RMSNorm(config.num_dims, config.rmsnorm_eps) # you also can use RMSNorm(config)
         self.ll_head = nn.Linear(self.num_dims, self.vocab_size, bias=False)
-        self.tokens_embedding = nn.Embedding(self.vocab_size, self.num_dims)
 
         self.ll_head.weight = self.tokens_embedding.weight
 
@@ -227,49 +228,109 @@ class Transformer(nn.Module, PyTorchModelHubMixin): # extending PyTorchModelHubM
 
 
 
+    
     def forward(
-        self,
-        x_masked: torch.LongTensor,          # (B, T)  tokens after masking in the train loop
-        targets: torch.LongTensor = None,    # (B, T)  targets
-        mask: torch.BoolTensor = None,       # (B, T)  True where xi_t == [MASK]
-        t: Optional[torch.Tensor] = None,    # (B,)    sampled mask ratios per example
-    ):
-
+            self,
+            x_masked: torch.LongTensor,          # (B, T)  tokens after masking in the train loop
+            targets: torch.LongTensor = None,    # (B, T)  targets
+            mask: torch.BoolTensor = None,       # (B, T)  True where xi_t == [MASK]
+            t: Optional[torch.Tensor] = None,    # (B,)    sampled mask ratios per example
+            ):
+        
         x = self.tokens_embedding(x_masked)
         cos, sin = self.rotary_emb(x, seq_dim=1)
+
         for block in self.blocks:
             x = block(x, cos, sin, start_pos=0)
+        
         x = self.norm(x)
-        logits = self.ll_head(x) # (B, T, V)
+        logits = self.ll_head(x)
 
-        if (targets is None) or (mask is None) or (t is None):
+        c_batch_size, c_context_len, c_dim = logits.shape
+
+        
+        
+        if targets is None:
             return logits, None
+        logits = logits.view(c_batch_size*c_context_len, c_dim)
+        targets = targets.view(c_batch_size*c_context_len)
+        ce_value = F.cross_entropy(logits, targets).view(c_batch_size * c_context_len)
+        
+        masked_loss = ce_value * mask.float() # zero loss where mask == False
 
-        B, T, V = logits.shape
-        ce = F.cross_entropy(
-            logits.view(B*T, V),
-            targets.view(B*T),
-            reduction="none"
-        ).view(B, T)
-
-        masked_ce = ce * mask.float() # zero loss where mask == False
-
-        loss_per_seq = masked_ce.sum(dim=1) / (t.clamp_min(1e-8) * float(T))  # (B,)
-        loss = loss_per_seq.mean()
+        loss_per_seq = masked_loss.sum(dim=1) / (t.clamp_min(1e-8) * float(c_context_len))  # (B,)
+        loss = loss_per_seq.mean() 
 
         return logits, loss
 
+
     @torch.no_grad()
-    def generate(self, x: torch.Tensor, max_tokens: int, temperature: float = 1.0, top_k: int = 50):
-        """
-        Generate text from x up to max_tokens
-        """
-        pass
+    def generate(self,
+             x_init: torch.LongTensor,
+             steps: int = 8,
+             temperature: float = 1.0,
+             top_k: int = 0,
+             mask: torch.BoolTensor = None,
+             sample: bool = False):
+        x = x_init.clone()
+        if mask is None:
+            mask = (x == self.config.mask_token_id)
+        else:
+            mask = mask.bool()
+
+        # uniform timetable t from 1.0 -> 0.0
+        tgrid = torch.linspace(1.0, 0.0, steps + 1, device=x.device)
+
+        for sidx in range(steps):
+            t = float(tgrid[sidx].item())
+            s = float(tgrid[sidx + 1].item())
+
+            logits, _ = self.forward(x_masked=x)
+            if temperature != 1.0:
+                logits = logits / max(temperature, 1e-6)
+            if top_k > 0:
+                topv, _ = torch.topk(logits, top_k, dim=-1)
+                logits = logits.masked_fill(logits < topv[..., -1, None], float("-inf"))
+
+            probs = F.softmax(logits, dim=-1)
+            pred = (torch.multinomial(probs.view(-1, probs.size(-1)), 1).view_as(x)
+                    if sample else probs.argmax(dim=-1))
+
+            # fill only where currently masked
+            x = torch.where(mask, pred, x)
+
+            # final step — stop before remasking
+            if sidx == steps - 1:
+                break
+
+            # keep a fraction s/t of masked tokens masked for next step (lowest-confidence)
+            conf, _ = probs.max(dim=-1)                 # (B, T)
+            conf_masked = conf.masked_fill(~mask, 1.0)  # 1.0 so they won't be picked
+
+            B = x.size(0)
+            new_mask = torch.zeros_like(mask)
+
+            mt = mask.sum(dim=1)  # how many are masked now
+            keep_counts = torch.ceil(mt.float() * (s / max(t, 1e-6))).to(torch.int64)
+
+            for b in range(B):
+                k = keep_counts[b].item()
+                if k <= 0 or mt[b].item() == 0:
+                    continue
+                _, idxs = torch.topk(conf_masked[b], k, largest=False)  # lowest confidence
+                keep = torch.zeros_like(mask[b])
+                keep[idxs] = True
+                new_mask[b] = keep & mask[b]
+
+            mask = new_mask
+
+        return x
+
     
 
 def main():
     config = ModelConfig(
-        device = 'cuda' if torch.cuda.is_available() else 'cpu',
+        # device = 'cuda' if torch.cuda.is_available() else 'cpu',
         vocab_size = 50304,
 
         num_dims = 1024,
@@ -303,3 +364,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
