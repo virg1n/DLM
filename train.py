@@ -129,50 +129,11 @@ def resize_vocab_(model, new_vocab):
 resize_vocab_(model, req_vocab)
 
 
-class FixedBatchLoader:
-    def __init__(self, train_batches, val_loader, config):
-        self.train_batches = train_batches 
-        self.val_loader = val_loader
-        self.config = config
-        self.train_idx = 0
-        self.num_train_batches = len(train_batches)
-        print(f"Created FixedBatchLoader with {self.num_train_batches} training batches.")
-
-        self._num_tokens = self.num_train_batches * self.config.batch_size * self.config.max_seq_len
-
-    def next_batch(self, split="train"):
-        if split == "train":
-            batch = self.train_batches[self.train_idx]
-            self.train_idx = (self.train_idx + 1) % self.num_train_batches
-            return batch
-        else:
-            return self.val_loader.next_batch(split="val")
-
-    @property
-    def num_tokens(self):
-        return self._num_tokens
-
-
-    def num_train_steps(self):
-
-        return self.num_train_batches
-    
-mock_loader = FixedBatchLoader(fixed_batches, data_loader, train_config)
-
-print("Initializing Trainer with (train_config, model, tokenizer)...")
 trainer = Trainer(train_config, model, tokenizer)
 
-print("len(tokenizer)=", len(tokenizer),
-      "base vocab_size=", tokenizer.vocab_size,
-      "mask_id=", tokenizer.mask_token_id,
-      "pad_id=", tokenizer.pad_token_id)
-print("model V=", model.tokens_embedding.num_embeddings)
 
-
-print("Starting training with custom FixedBatchLoader...")
 trainer.train(data_loader)
 
-print("\n--- Training complete. Starting Generation ---")
 
 model.eval()
 
