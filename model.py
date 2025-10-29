@@ -136,14 +136,15 @@ class GroupedQueryAttention(nn.Module):
         v = v.view(c_batch_size, c_context_len, self.num_kv_heads, self.head_dim).transpose(1, 2)   # B, vh, T, hs
 
         queries, keys = self.apply_rotary_pos(q, k, cos, sin)
-        keys = repeat_kv(keys, self.num_rep)
-        values = repeat_kv(v, self.num_rep)
+        # keys = repeat_kv(keys, self.num_rep)
+        # values = repeat_kv(v, self.num_rep)
 
         if self.use_flash:
-            output = F.scaled_dot_product_attention(queries, keys, values, is_causal=False)
+            output = F.scaled_dot_product_attention(queries, keys, v, is_causal=False, enable_gqa=True)
             
         else: # Calculate Grouped Query Attention manually
-        
+            values = repeat_kv(v, self.num_rep)
+            keys = repeat_kv(keys, self.num_rep)
             attention = torch.matmul(queries, keys.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
 
             attention = F.softmax(attention, dim=-1).type_as(queries)
@@ -236,7 +237,10 @@ class Transformer(nn.Module, PyTorchModelHubMixin): # extending PyTorchModelHubM
             mask: torch.BoolTensor = None,       # (B, T)  True where xi_t == [MASK]
             t: Optional[torch.Tensor] = None,    # (B,)    sampled mask ratios per example
             ):
-        
+        xmin = int(x_masked.min().item()); xmax = int(x_masked.max().item())
+        V = self.tokens_embedding.num_embeddings
+        assert 0 <= xmin and xmax < V, f"input id out of range: min={xmin}, max={xmax}, V={V}"
+
         x = self.tokens_embedding(x_masked)
         cos, sin = self.rotary_emb(x, seq_dim=1)
 
@@ -254,7 +258,11 @@ class Transformer(nn.Module, PyTorchModelHubMixin): # extending PyTorchModelHubM
             return logits, None
         logits = logits.view(c_batch_size*c_context_len, c_dim)
         targets = targets.view(c_batch_size*c_context_len)
-        ce_value = F.cross_entropy(logits, targets).view(c_batch_size * c_context_len)
+        assert targets.dtype == torch.long, f"targets dtype {targets.dtype} must be long"
+        mn = int(targets.min().item()); mx = int(targets.max().item())
+        assert mn >= 0, f"negative target id: min={mn}"
+        assert mx < c_dim, f"target id {mx} >= vocab dim V={c_dim}"
+        ce_value = F.cross_entropy(logits, targets, reduction='none').view(c_batch_size, c_context_len)
         
         masked_loss = ce_value * mask.float() # zero loss where mask == False
 
@@ -290,7 +298,8 @@ class Transformer(nn.Module, PyTorchModelHubMixin): # extending PyTorchModelHubM
                 logits = logits / max(temperature, 1e-6)
             if top_k > 0:
                 topv, _ = torch.topk(logits, top_k, dim=-1)
-                logits = logits.masked_fill(logits < topv[..., -1, None], float("-inf"))
+                threshold = topv[..., -1].unsqueeze(-1)
+                logits = logits.masked_fill(logits < threshold, float("-inf"))
 
             probs = F.softmax(logits, dim=-1)
             pred = (torch.multinomial(probs.view(-1, probs.size(-1)), 1).view_as(x)
@@ -303,7 +312,6 @@ class Transformer(nn.Module, PyTorchModelHubMixin): # extending PyTorchModelHubM
             if sidx == steps - 1:
                 break
 
-            # keep a fraction s/t of masked tokens masked for next step (lowest-confidence)
             conf, _ = probs.max(dim=-1)                 # (B, T)
             conf_masked = conf.masked_fill(~mask, 1.0)  # 1.0 so they won't be picked
 
@@ -317,7 +325,7 @@ class Transformer(nn.Module, PyTorchModelHubMixin): # extending PyTorchModelHubM
                 k = keep_counts[b].item()
                 if k <= 0 or mt[b].item() == 0:
                     continue
-                _, idxs = torch.topk(conf_masked[b], k, largest=False)  # lowest confidence
+                _, idxs = torch.topk(conf_masked[b], k, largest=False)
                 keep = torch.zeros_like(mask[b])
                 keep[idxs] = True
                 new_mask[b] = keep & mask[b]
@@ -329,37 +337,38 @@ class Transformer(nn.Module, PyTorchModelHubMixin): # extending PyTorchModelHubM
     
 
 def main():
-    config = ModelConfig(
-        # device = 'cuda' if torch.cuda.is_available() else 'cpu',
-        vocab_size = 50304,
+    pass
+    # config = ModelConfig(
+    #     # device = 'cuda' if torch.cuda.is_available() else 'cpu',
+    #     vocab_size = 50304,
 
-        num_dims = 1024,
-        num_heads = 16,
-        num_kv_heads = 4,
-        num_layers = 16,
-        ffn_hidden_dims = 1024 * 4,
+    #     num_dims = 1024,
+    #     num_heads = 16,
+    #     num_kv_heads = 4,
+    #     num_layers = 16,
+    #     ffn_hidden_dims = 1024 * 4,
 
-        rmsnorm_eps = 1e-6,
-        rope_theta = 1e5,
+    #     rmsnorm_eps = 1e-6,
+    #     rope_theta = 1e5,
 
-        context_len = 1024,
+    #     context_len = 1024,
         
-        use_flash = False,
-    )
+    #     use_flash = False,
+    # )
 
     
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    SEED = 1337
+    # device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # SEED = 1337
 
-    torch.manual_seed(SEED)
-    if device == 'cuda':
-        torch.cuda.manual_seed(SEED)
+    # torch.manual_seed(SEED)
+    # if device == 'cuda':
+    #     torch.cuda.manual_seed(SEED)
 
-    model = Transformer(config)
-    model = model.to(device)
-    model = torch.compile(model)
+    # model = Transformer(config)
+    # model = model.to(device)
+    # model = torch.compile(model)
 
-    print(sum(p.numel() for p in model.parameters())/1e6, 'M parameters')
+    # print(sum(p.numel() for p in model.parameters())/1e6, 'M parameters')
 
 
 if __name__ == "__main__":

@@ -1,0 +1,5 @@
+torch
+huggingface-hub
+transformers
+datatrove
+datasets

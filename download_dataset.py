@@ -12,7 +12,7 @@ def datatrove_tokenization_executor(hf_dataset_id,
                                     tokenizer_id,
                                     eos_token,
                                     num_workers,
-                                    shuffle=True,
+                                    max_documents=None, # max_documents parameter
                                     job_id=None):
     if not job_id:
         job_id = secrets.token_hex(8)
@@ -27,7 +27,8 @@ def datatrove_tokenization_executor(hf_dataset_id,
             },
             text_key=text_column,
             id_key=id_column,
-            streaming=True
+            streaming=True,
+            limit=max_documents
         ),
         DocumentTokenizer(
             output_folder=output_folder,
@@ -35,15 +36,13 @@ def datatrove_tokenization_executor(hf_dataset_id,
             eos_token=eos_token,
             batch_size=1000,
             max_tokens_per_file=int(1e8),
-            shuffle=shuffle,
             seed=1998
         )
     ]
-
     executor = LocalPipelineExecutor(
         pipeline=pipeline,
         logging_dir=f"logs_{job_id}/",
-        tasks=num_workers * 10,
+        tasks=num_workers,
         workers=num_workers,
     )
 
@@ -51,8 +50,10 @@ def datatrove_tokenization_executor(hf_dataset_id,
 
 
 def main():
-    hf_checkpoint = "HuggingFaceTB/SmolLM2-135M"
+    hf_checkpoint = "HuggingFaceTB/SmolLM-360M"
     tokenizer = AutoTokenizer.from_pretrained(hf_checkpoint)
+
+    doc_limit = 30
 
     executor = datatrove_tokenization_executor(
         job_id="tokenize_fineweb-edu_sample10BT",
@@ -63,8 +64,8 @@ def main():
         output_folder="./fwe-10BT",
         tokenizer_id=hf_checkpoint,
         eos_token=tokenizer.eos_token,
-        shuffle=False,
-        num_workers=4
+        num_workers=2,
+        max_documents=doc_limit 
     )
     executor.run()
 

@@ -123,7 +123,7 @@ class DataLoader:
     def load_dataset(self, seed: int):
         self.dataset = DatatroveFolderDataset(
             folder_path=self.config.tokenized_dataset_path,
-            filename_pattern=os.path.join(self.config.tokenized_dataset_path, "**", "*.ds"),
+            filename_pattern="**/*.ds", #os.path.join(self.config.tokenized_dataset_path, "**", "*.ds"),
             seq_len=self.config.max_seq_len,
             token_size=self.token_size,
             recursive=True,
@@ -146,6 +146,8 @@ class Trainer:
 
         self.steps_for_eval = config.steps_for_eval
         self.weight_decay = config.weight_decay
+
+        self.tokenizer = tokenizer
 
         self.device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
         n_gpus = torch.cuda.device_count() if self.device.type == "cuda" else 0
@@ -190,7 +192,6 @@ class Trainer:
             )
             print(f"use {'torch.compile()' if use_compile else 'eager'}: {use_compile}")
 
-    # --------- Masked diffusion helpers ---------
 
     def _sample_mask(self, x: torch.LongTensor):
         """
@@ -204,16 +205,14 @@ class Trainer:
         B, T = x.shape
         device = x.device
 
-        # Sample per-example mask ratios t ~ Uniform(0, 1)
-        t = torch.rand(B, device=device)  # (B,)
+        t = torch.rand(B, device=device)  # (B)
+        t = t.clamp(0.1, 0.9)
 
         probs = t.unsqueeze(1).expand(B, T)
         mask = torch.bernoulli(probs).bool()  # (B, T)
 
-        # Ensure at least one masked token per sequence to avoid division by ~0 during training
         none_masked = ~mask.any(dim=1)
         if none_masked.any():
-            # choose a random column per affected row
             rand_cols = torch.randint(low=0, high=T, size=(none_masked.sum(),), device=device)
             mask[none_masked, :] = False
             mask[none_masked, rand_cols] = True
@@ -229,7 +228,7 @@ class Trainer:
         Performs single forward/backward pass with gradient accumulation.
             Returns: (loss (reduced), number_of_processed_tokens)
         """
-        x = data_loader.next_batch(split=split)  # (B, T) unshifted
+        x = data_loader.next_batch(split=split)  # (B, T)
         x = x.to(self.device)
         num_tokens += torch.numel(x)
 
@@ -331,9 +330,32 @@ class Trainer:
     def eval(self, data_loader):
         with torch.no_grad():
             val_loss_accum = 0.0
+            k = 1
+
             for _ in range(self.steps_for_eval):
                 x = data_loader.next_batch(split="val").to(self.device)
                 x_masked, targets, mask, t = self._sample_mask(x)
+                if k == 1:
+                    k = 0
+                    prompt_tokens = x[0][:5].unsqueeze(0).to(self.device)
+                    gen_len = 100
+
+                    mask_id = self.model.config.mask_token_id
+                    cont = torch.full((1, gen_len), fill_value=mask_id, dtype=prompt_tokens.dtype, device=prompt_tokens.device)
+
+                    x_init = torch.cat([prompt_tokens, cont], dim=1)
+
+                    mask = torch.zeros_like(x_init, dtype=torch.bool)
+                    mask[:, prompt_tokens.size(1):] = True
+
+                    steps = 60
+
+                    with torch.no_grad():
+                        completed = self.model.generate(x_init, steps=steps, temperature=1, mask=mask, sample=False, top_k=50)
+
+                    generated_text = self.tokenizer.decode(completed[0].tolist(), skip_special_tokens=True)
+                    print(f"Prompt: '{self.tokenizer.decode(prompt_tokens[0].tolist(), skip_special_tokens=True)}'")
+                    print("Generated text:\n", generated_text)
 
                 with torch.autocast(device_type=self.device.type, dtype=self.dtype):
                     _, loss = self.model(
