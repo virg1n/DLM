@@ -252,11 +252,11 @@ class Transformer(nn.Module, PyTorchModelHubMixin): # extending PyTorchModelHubM
 
         c_batch_size, c_context_len, c_dim = logits.shape
 
-        
+        logits = logits.view(c_batch_size*c_context_len, c_dim)
         
         if targets is None:
             return logits, None
-        logits = logits.view(c_batch_size*c_context_len, c_dim)
+        
         targets = targets.view(c_batch_size*c_context_len)
         assert targets.dtype == torch.long, f"targets dtype {targets.dtype} must be long"
         mn = int(targets.min().item()); mx = int(targets.max().item())
@@ -277,7 +277,7 @@ class Transformer(nn.Module, PyTorchModelHubMixin): # extending PyTorchModelHubM
              x_init: torch.LongTensor,
              steps: int = 8,
              temperature: float = 1.0,
-             top_k: int = 0,
+             top_k: int = 1,
              mask: torch.BoolTensor = None,
              sample: bool = False):
         x = x_init.clone()
@@ -319,7 +319,7 @@ class Transformer(nn.Module, PyTorchModelHubMixin): # extending PyTorchModelHubM
             new_mask = torch.zeros_like(mask)
 
             mt = mask.sum(dim=1)  # how many are masked now
-            keep_counts = torch.ceil(mt.float() * (s / max(t, 1e-6))).to(torch.int64)
+            keep_counts = torch.ceil(mt.float() * (s / max(t, 1e-6))).to(torch.int64) # (B)
 
             for b in range(B):
                 k = keep_counts[b].item()
