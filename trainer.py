@@ -45,6 +45,7 @@ class TrainerConfig:
     eval_log_file: str = "logs/eval.txt"
 
 
+
 class DataLoader:
     """
     Loads fixed-length token sequences and returns batches of *unshifted* token IDs.
@@ -74,20 +75,31 @@ class DataLoader:
         self.val_start_idx = self.train_len_dataset
         self.val_current_idx = self.val_start_idx
 
+        self.MIN_SEQ_LEN = getattr(self.config, "min_seq_len", max(8, self.config.max_seq_len // 4))
+        self.RANDOM_CROP = getattr(self.config, "random_crop", True)
+
     def get_batch(self, current_idx: int, start_idx: int, end_idx: int):
         new_idx = current_idx + self.config.batch_size
 
+        # choose batch length
+        L = int(torch.randint(self.MIN_SEQ_LEN, self.config.max_seq_len + 1, (1,)).item())
+
         seqs = []
         for idx in range(current_idx, min(new_idx, end_idx)):
-            # Unshifted full sequence length max_seq_len
-            seqs.append(self.dataset[idx]["input_ids"])
+            full = self.dataset[idx]["input_ids"]  # shape: (max_seq_len,)
+            if self.RANDOM_CROP and L < full.size(0):
+                start = int(torch.randint(0, full.size(0) - L + 1, (1,)).item())
+                seqs.append(full[start:start+L])
+            else:
+                seqs.append(full[:L])
+
         if not seqs:
-            # Safety: if we somehow overrun, restart epoch
             new_idx = start_idx
             self.new_epoch()
-            seqs = [self.dataset[new_idx]["input_ids"]]
+            full = self.dataset[new_idx]["input_ids"]
+            seqs = [full[:L]]
 
-        x = torch.stack(seqs)  # (B, T)
+        x = torch.stack(seqs)  # (B, L)
 
         if new_idx >= end_idx:
             new_idx = start_idx
