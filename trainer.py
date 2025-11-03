@@ -10,6 +10,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from datatrove.utils.dataset import DatatroveFolderDataset
 
+import torch.nn.functional as F
+
+
 @dataclass
 class TrainerConfig:
     vocab_size: int
@@ -206,7 +209,7 @@ class Trainer:
         device = x.device
 
         t = torch.rand(B, device=device)  # (B)
-        t = t.clamp(0.1, 0.9)
+        # t = t.clamp(0.1, 0.9)
 
         probs = t.unsqueeze(1).expand(B, T)
         mask = torch.bernoulli(probs).bool()  # (B, T)
@@ -244,6 +247,7 @@ class Trainer:
 
         loss = loss / accumulation_steps
         loss.backward()
+
         return loss, num_tokens
 
     def train(self, data_loader):
@@ -377,3 +381,5 @@ class Trainer:
         }
         torch.save(checkpoint, checkpoint_path)
         print("Checkpoints saved")
+
+

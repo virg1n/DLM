@@ -338,38 +338,6 @@ class Transformer(nn.Module, PyTorchModelHubMixin): # extending PyTorchModelHubM
 
 def main():
     pass
-    # config = ModelConfig(
-    #     # device = 'cuda' if torch.cuda.is_available() else 'cpu',
-    #     vocab_size = 50304,
-
-    #     num_dims = 1024,
-    #     num_heads = 16,
-    #     num_kv_heads = 4,
-    #     num_layers = 16,
-    #     ffn_hidden_dims = 1024 * 4,
-
-    #     rmsnorm_eps = 1e-6,
-    #     rope_theta = 1e5,
-
-    #     context_len = 1024,
-        
-    #     use_flash = False,
-    # )
-
-    
-    # device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    # SEED = 1337
-
-    # torch.manual_seed(SEED)
-    # if device == 'cuda':
-    #     torch.cuda.manual_seed(SEED)
-
-    # model = Transformer(config)
-    # model = model.to(device)
-    # model = torch.compile(model)
-
-    # print(sum(p.numel() for p in model.parameters())/1e6, 'M parameters')
-
 
 if __name__ == "__main__":
     main()
